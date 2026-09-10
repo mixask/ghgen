@@ -1,8 +1,7 @@
 /**
- * hello pls deploy this vers
  * ghgen — GHGen dashboard worker
- * Bindings: DB (D1), POOL_KEY (Secret)
- * UPLOAD_SECRET захардкожен
+ * Bindings: DB (D1)
+ * POOL_KEY и UPLOAD_SECRET захардкожены в коде
  * Claim cooldown: 5 минут
  */
 
@@ -13,12 +12,17 @@ const CORS = {
 };
 
 const SESSION_TTL = 7 * 24 * 60 * 60;
-const CLAIM_COOLDOWN = 5 * 60; // 5 минут
+const CLAIM_COOLDOWN = 5 * 60;
 const PBKDF2_ITER = 100_000;
 const PBKDF2_HASH = "SHA-256";
 
+// ============================================================
+//  HARDCODED SECRETS
+//  ⚠️ POOL_KEY НЕЛЬЗЯ менять после загрузки аккаунтов —
+//  иначе старые данные в пуле невозможно расшифровать.
+// ============================================================
 const HARDCODED_UPLOAD_SECRET = "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q";
-const HARDCODED_UPLOAD_SECRET = "kmBG9WpCmnrAjI1eCcGzzH8gZAuYjLj0k0B7VstliFM=";
+const HARDCODED_POOL_KEY = "kmBG9WpCmnrAjI1eCcGzzH8gZAuYjLj0k0B7VstliFM=";
 
 const jsonHeaders = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 
@@ -105,10 +109,14 @@ function bytesToB64(bytes) {
   return btoa(bin);
 }
 
+// ============================================================
+//  POOL KEY — захардкожен
+// ============================================================
 async function getPoolKey(env) {
-  const raw = env.POOL_KEY;
+  const raw = HARDCODED_POOL_KEY;
   if (!raw) throw new Error("POOL_KEY not set");
   const keyBytes = b64ToBytes(raw);
+  if (keyBytes.length !== 32) throw new Error("POOL_KEY must be 32 bytes (got " + keyBytes.length + ")");
   return crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
@@ -567,7 +575,7 @@ async function handleClaim(env, request) {
       .bind(user.id, "claim", JSON.stringify({ pool_id: res.id }), getIP(request), ts).run();
     return json({ ok: true, account: { ...dec, issued_at: ts } });
   } catch (e) {
-    return json({ ok: false, error: "decrypt_failed" }, 500);
+    return json({ ok: false, error: "decrypt_failed", message: String(e.message || e) }, 500);
   }
 }
 
@@ -582,7 +590,6 @@ async function handlePoolUpload(request, env) {
   if (!accounts.length) return json({ ok: false, error: "no_accounts" }, 400);
   if (accounts.length > 500) return json({ ok: false, error: "too_many", max: 500 }, 413);
 
-  // Проверяем POOL_KEY до начала обработки
   try {
     await getPoolKey(env);
   } catch (e) {
@@ -595,7 +602,7 @@ async function handlePoolUpload(request, env) {
   for (const a of accounts) {
     if (!a || typeof a.u !== "string" || typeof a.p !== "string") {
       skipped++;
-      if (errors.length < 3) errors.push(`invalid_record: ${JSON.stringify(a).slice(0, 100)}`);
+      if (errors.length < 3) errors.push(`invalid_record`);
       continue;
     }
     const clean = {
@@ -623,9 +630,26 @@ async function handlePoolUpload(request, env) {
 async function handlePoolStats(request, env) {
   const secret = request.headers.get("X-Upload-Secret");
   if (secret !== HARDCODED_UPLOAD_SECRET) return json({ ok: false, error: "unauthorized" }, 401);
+
+  let poolKeyOk = true;
+  let poolKeyError = null;
+  try {
+    await getPoolKey(env);
+  } catch (e) {
+    poolKeyOk = false;
+    poolKeyError = String(e.message || e);
+  }
+
   const avail = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='available'`).first();
   const issued = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='issued'`).first();
-  return json({ ok: true, available: avail.c, issued: issued.c, total: avail.c + issued.c });
+  return json({
+    ok: true,
+    available: avail.c,
+    issued: issued.c,
+    total: avail.c + issued.c,
+    pool_key_ok: poolKeyOk,
+    pool_key_error: poolKeyError,
+  });
 }
 
 export default {
