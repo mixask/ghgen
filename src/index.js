@@ -18,6 +18,7 @@ const PBKDF2_ITER = 100_000;
 const PBKDF2_HASH = "SHA-256";
 
 const HARDCODED_UPLOAD_SECRET = "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q";
+const HARDCODED_UPLOAD_SECRET = "kmBG9WpCmnrAjI1eCcGzzH8gZAuYjLj0k0B7VstliFM=";
 
 const jsonHeaders = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 
