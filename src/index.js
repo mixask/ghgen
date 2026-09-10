@@ -1,25 +1,23 @@
 /**
  * ghgen — GHGen dashboard worker
- * Bindings: DB (D1)
- * Vars: SITE_NAME, MAIN_SITE
- * Secrets: (none required)
- *
- * Share D1 with greedyhudzell worker. Reads keys table, writes ghgen_* tables only.
+ * Bindings: DB (D1), POOL_KEY, UPLOAD_SECRET
  */
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, X-Upload-Secret",
 };
 
-const SESSION_TTL = 7 * 24 * 60 * 60;      // 7 дней
+const SESSION_TTL = 7 * 24 * 60 * 60;
 const PBKDF2_ITER = 100_000;
 const PBKDF2_HASH = "SHA-256";
 
 const jsonHeaders = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 
-// ---------- utils ----------
+let MAIN_SITE = "https://greedyhudzell.xyz";
+function setMainSite(v) { if (v) MAIN_SITE = v; }
+
 const now = () => Math.floor(Date.now() / 1000);
 
 function json(data, status = 200, extra = {}) {
@@ -48,13 +46,12 @@ function randomId(len = 24) {
   return [...b].map(x => x.toString(16).padStart(2, "0")).join("");
 }
 
+// ---------- password hashing ----------
 async function hashPassword(password) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const km = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt, iterations: PBKDF2_ITER, hash: PBKDF2_HASH },
-    keyMaterial,
-    256
+    { name: "PBKDF2", salt, iterations: PBKDF2_ITER, hash: PBKDF2_HASH }, km, 256
   );
   const hex = (u8) => [...u8].map(b => b.toString(16).padStart(2, "0")).join("");
   return `pbkdf2$${PBKDF2_ITER}$${hex(salt)}$${hex(new Uint8Array(bits))}`;
@@ -66,17 +63,16 @@ async function verifyPassword(stored, password) {
     if (scheme !== "pbkdf2") return false;
     const iterations = parseInt(iterStr, 10);
     const salt = new Uint8Array(saltHex.match(/.{2}/g).map(b => parseInt(b, 16)));
-    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+    const km = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
     const bits = await crypto.subtle.deriveBits(
-      { name: "PBKDF2", salt, iterations, hash: PBKDF2_HASH },
-      keyMaterial,
-      256
+      { name: "PBKDF2", salt, iterations, hash: PBKDF2_HASH }, km, 256
     );
     const computed = [...new Uint8Array(bits)].map(b => b.toString(16).padStart(2, "0")).join("");
     return computed === hashHex;
   } catch { return false; }
 }
 
+// ---------- cookies ----------
 function cookieHeader(name, value, maxAge) {
   return `${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
@@ -90,6 +86,43 @@ function getCookie(request, name) {
     if (k === name) return decodeURIComponent(rest.join("="));
   }
   return null;
+}
+
+// ---------- pool encryption (AES-GCM) ----------
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function bytesToB64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+async function getPoolKey(env) {
+  const raw = env.POOL_KEY;
+  if (!raw) throw new Error("POOL_KEY not set");
+  const keyBytes = b64ToBytes(raw);
+  return crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+async function encryptPayload(env, obj) {
+  const key = await getPoolKey(env);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(JSON.stringify(obj));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
+  return `${bytesToB64(iv)}:${bytesToB64(new Uint8Array(ct))}`;
+}
+
+async function decryptPayload(env, stored) {
+  const key = await getPoolKey(env);
+  const [ivB64, ctB64] = stored.split(":");
+  const iv = b64ToBytes(ivB64);
+  const ct = b64ToBytes(ctB64);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+  return JSON.parse(new TextDecoder().decode(pt));
 }
 
 // ---------- sessions ----------
@@ -166,14 +199,9 @@ th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;le
 .badge{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(201,162,39,.12);color:var(--accent);border:1px solid rgba(201,162,39,.25)}
 .badge.ok{background:rgba(76,175,122,.12);color:var(--ok);border-color:rgba(76,175,122,.3)}
 .badge.err{background:rgba(232,93,93,.12);color:var(--bad);border-color:rgba(232,93,93,.3)}
-.status-pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:var(--bg2);border:1px solid var(--line)}
-.status-pill.success{color:var(--ok);border-color:rgba(76,175,122,.3)}
-.status-pill.fail{color:var(--bad);border-color:rgba(232,93,93,.3)}
-.status-pill.pending,.status-pill.running{color:var(--accent);border-color:rgba(201,162,39,.3)}
 .note{color:var(--muted);font-size:12px;margin-top:14px}
-.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:18px}
-.tabs button{background:none;border:0;border-bottom:2px solid transparent;border-radius:0;padding:10px 14px;color:var(--muted)}
-.tabs button.active{color:var(--text);border-bottom-color:var(--accent)}
+.reveal{background:#0a0a0c;border:1px dashed var(--line);padding:6px 10px;border-radius:6px;cursor:pointer;display:inline-block;color:var(--muted);font-size:12px}
+.reveal:hover{border-color:var(--accent);color:var(--accent)}
 </style>
 </head>
 <body>
@@ -185,7 +213,6 @@ th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;le
     </a>
     <nav class="nav">
       <a href="/dashboard">Dashboard</a>
-      <a href="/accounts">Accounts</a>
       <a href="/docs">Docs</a>
       <a href="${MAIN_SITE}">Main site ↗</a>
     </nav>
@@ -195,10 +222,6 @@ th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;le
 </body>
 </html>`;
 }
-
-// Since MAIN_SITE not available at module scope, we inject at request time via a setter.
-let MAIN_SITE = "https://greedyhudzell.xyz";
-function setMainSite(v) { if (v) MAIN_SITE = v; }
 
 function loginPage(msg = "") {
   return pageShell("Login", `
@@ -214,8 +237,7 @@ function loginPage(msg = "") {
       <button class="primary" style="width:100%;margin-top:16px" type="submit">Sign in</button>
     </form>
     <p class="note">No account? <a href="/register">Register with key</a></p>
-  </div>
-  `);
+  </div>`);
 }
 
 function registerPage(msg = "") {
@@ -236,8 +258,7 @@ function registerPage(msg = "") {
       <button class="primary" style="width:100%;margin-top:16px" type="submit">Create account</button>
     </form>
     <p class="note">Already registered? <a href="/login">Sign in</a></p>
-  </div>
-  `);
+  </div>`);
 }
 
 function dashboardPage(user, keyStatus) {
@@ -258,49 +279,60 @@ function dashboardPage(user, keyStatus) {
       </p>
     </div>
     <div class="card">
-      <h2>Generate</h2>
-      <p class="muted">Request a new Roblox account.</p>
-      <button class="primary" id="btn-gen" style="margin-top:12px;width:100%">Generate account</button>
-      <p class="note" id="gen-out"></p>
+      <h2>Claim account</h2>
+      <p class="muted">Take a random account from the pool.</p>
+      <button class="primary" id="btn-claim" style="margin-top:12px;width:100%">Claim account</button>
+      <p class="note" id="claim-out"></p>
     </div>
   </div>
 
   <div class="card">
-    <h2>Recent accounts</h2>
+    <h2>Your accounts</h2>
     <div id="accounts-list"><p class="muted">Loading…</p></div>
   </div>
 
   <script>
+  function mask(v){ if(!v) return '—'; const s=String(v); if(s.length<=6) return s[0]+'•••'; return s.slice(0,3)+'•••'+s.slice(-2); }
+
   async function loadAccounts() {
     const el = document.getElementById('accounts-list');
     try {
       const r = await fetch('/api/accounts', { credentials: 'same-origin' });
       const d = await r.json();
       if (!d.ok) { el.innerHTML = '<p class="err">' + (d.error || 'error') + '</p>'; return; }
-      if (!d.accounts.length) { el.innerHTML = '<p class="muted">No accounts yet.</p>'; return; }
-      el.innerHTML = '<table><thead><tr><th>Username</th><th>Location</th><th>Status</th><th>Created</th></tr></thead><tbody>'
-        + d.accounts.map(a => '<tr>'
-          + '<td class="mono">' + (a.roblox_username || '—') + '</td>'
-          + '<td>' + (a.country || '') + (a.city ? ', ' + a.city : '') + '</td>'
-          + '<td><span class="status-pill ' + a.status + '">' + a.status + '</span></td>'
-          + '<td class="muted">' + new Date(a.created_at * 1000).toLocaleString() + '</td>'
+      if (!d.accounts.length) { el.innerHTML = '<p class="muted">No accounts yet. Click Claim.</p>'; return; }
+      el.innerHTML = '<table><thead><tr><th>Username</th><th>Password</th><th>Location</th><th>Cookie</th><th>Claimed</th></tr></thead><tbody>'
+        + d.accounts.map((a, i) => '<tr>'
+          + '<td class="mono">' + a.u + '</td>'
+          + '<td><span class="reveal" data-id="p-' + i + '" data-val="' + encodeURIComponent(a.p || '') + '">' + mask(a.p) + '</span></td>'
+          + '<td>' + ((a.c || '') + (a.ci ? ', ' + a.ci : '') || '—') + (a.ip ? '<br><span class="muted mono">' + a.ip + '</span>' : '') + '</td>'
+          + '<td>' + (a.ck ? '<span class="reveal" data-id="c-' + i + '" data-val="' + encodeURIComponent(a.ck) + '">' + mask(a.ck) + '</span>' : '<span class="muted">—</span>') + '</td>'
+          + '<td class="muted">' + new Date(a.issued_at * 1000).toLocaleString() + '</td>'
           + '</tr>').join('') + '</tbody></table>';
+      document.querySelectorAll('.reveal').forEach(el => {
+        el.addEventListener('click', function(){
+          const v = decodeURIComponent(this.dataset.val);
+          if (this.dataset.revealed === '1') {
+            this.textContent = mask(v); this.dataset.revealed = '0';
+          } else {
+            this.textContent = v; this.dataset.revealed = '1';
+          }
+        });
+      });
     } catch (e) {
       el.innerHTML = '<p class="err">' + e + '</p>';
     }
   }
-  document.getElementById('btn-gen').addEventListener('click', async () => {
-    const out = document.getElementById('gen-out');
-    out.className = 'note'; out.textContent = 'Queueing…';
-    const r = await fetch('/api/generate', { method: 'POST', credentials: 'same-origin' });
+  document.getElementById('btn-claim').addEventListener('click', async () => {
+    const out = document.getElementById('claim-out');
+    out.className = 'note'; out.textContent = 'Claiming…';
+    const r = await fetch('/api/claim', { method: 'POST', credentials: 'same-origin' });
     const d = await r.json();
-    if (d.ok) { out.className = 'note ok'; out.textContent = 'Queued (id ' + d.job_id + ').'; loadAccounts(); }
+    if (d.ok) { out.className = 'note ok'; out.textContent = 'Claimed: ' + d.account.u; loadAccounts(); }
     else { out.className = 'note err'; out.textContent = d.error || 'error'; }
   });
   loadAccounts();
-  setInterval(loadAccounts, 5000);
-  </script>
-  `);
+  </script>`);
 }
 
 function docsPage() {
@@ -312,14 +344,13 @@ function docsPage() {
     <p class="muted">You need a valid GH key (free via Work.ink or paid via Discord). One key = one GHGen account.</p>
   </div>
   <div class="card">
-    <h2>Generate</h2>
-    <p class="muted">Click "Generate account" on the dashboard. The bot picks up the job, creates the account, and it appears in your list.</p>
+    <h2>Claim</h2>
+    <p class="muted">Click "Claim account" on the dashboard. You get a random available account from the pool.</p>
   </div>
   <div class="card">
     <h2>Rules</h2>
-    <p class="muted">Do not share your account. Do not resell generated accounts. Abuse = ban.</p>
-  </div>
-  `);
+    <p class="muted">Do not share your account. Do not resell claimed accounts. Abuse = ban.</p>
+  </div>`);
 }
 
 function escapeHtml(s) {
@@ -327,41 +358,28 @@ function escapeHtml(s) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-// ---------- KEY VALIDATION (reads from shared keys table) ----------
+// ---------- key validation ----------
 async function loadKeyStatus(env, key) {
   const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
   if (!record) return { valid: false, reason: "invalid_key" };
   if (record.revoked === 1) return { valid: false, reason: "revoked", plan: record.plan };
   if (Number(record.expires_at) <= now()) return { valid: false, reason: "expired", plan: record.plan, expires_at: record.expires_at };
-  return {
-    valid: true,
-    plan: record.plan || "day",
-    expires_at: record.expires_at,
-    activated: record.activated === 1,
-  };
+  return { valid: true, plan: record.plan || "day", expires_at: record.expires_at };
 }
 
-// ---------- ROUTES ----------
+// ---------- auth handlers ----------
 async function handleRegister(request, env) {
   const ct = request.headers.get("Content-Type") || "";
   let body;
-  if (ct.includes("application/json")) {
-    body = await request.json().catch(() => ({}));
-  } else {
+  if (ct.includes("application/json")) body = await request.json().catch(() => ({}));
+  else {
     const fd = await request.formData();
-    body = {
-      key: fd.get("key"),
-      username: fd.get("username"),
-      password: fd.get("password"),
-      password2: fd.get("password2"),
-    };
+    body = { key: fd.get("key"), username: fd.get("username"), password: fd.get("password"), password2: fd.get("password2") };
   }
-
   const key = String(body.key || "").trim();
   const username = String(body.username || "").trim();
   const password = String(body.password || "");
   const password2 = String(body.password2 || password);
-
   const wantsHtml = !ct.includes("application/json");
 
   if (!/^GH-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/i.test(key) && !key.startsWith("GH-PAID-")) {
@@ -377,51 +395,36 @@ async function handleRegister(request, env) {
     return wantsHtml ? html(registerPage("Passwords do not match."), 400) : json({ ok: false, error: "password_mismatch" }, 400);
   }
 
-  // Validate key
   const ks = await loadKeyStatus(env, key);
-  if (!ks.valid) {
-    return wantsHtml ? html(registerPage(`Key: ${ks.reason}`), 403) : json({ ok: false, error: ks.reason }, 403);
-  }
+  if (!ks.valid) return wantsHtml ? html(registerPage(`Key: ${ks.reason}`), 403) : json({ ok: false, error: ks.reason }, 403);
 
-  // Check uniqueness
   const dupKey = await env.DB.prepare(`SELECT id FROM ghgen_users WHERE key = ? LIMIT 1`).bind(key).first();
-  if (dupKey) {
-    return wantsHtml ? html(registerPage("Key already registered."), 409) : json({ ok: false, error: "key_already_registered" }, 409);
-  }
+  if (dupKey) return wantsHtml ? html(registerPage("Key already registered."), 409) : json({ ok: false, error: "key_already_registered" }, 409);
   const dupUser = await env.DB.prepare(`SELECT id FROM ghgen_users WHERE username = ? LIMIT 1`).bind(username).first();
-  if (dupUser) {
-    return wantsHtml ? html(registerPage("Username taken."), 409) : json({ ok: false, error: "username_taken" }, 409);
-  }
+  if (dupUser) return wantsHtml ? html(registerPage("Username taken."), 409) : json({ ok: false, error: "username_taken" }, 409);
 
   const hash = await hashPassword(password);
-  const ts = now();
   await env.DB.prepare(
-    `INSERT INTO ghgen_users (username, password_hash, key, created_at)
-     VALUES (?, ?, ?, ?)`
-  ).bind(username, hash, key, ts).run();
+    `INSERT INTO ghgen_users (username, password_hash, key, created_at) VALUES (?, ?, ?, ?)`
+  ).bind(username, hash, key, now()).run();
 
-  // Auto-login
   const userRow = await env.DB.prepare(`SELECT id FROM ghgen_users WHERE username = ? LIMIT 1`).bind(username).first();
   const sid = await createSession(env, userRow.id, getIP(request));
   await env.DB.prepare(`INSERT INTO ghgen_log (user_id, action, ip, created_at) VALUES (?, ?, ?, ?)`)
-    .bind(userRow.id, "register", getIP(request), ts).run();
+    .bind(userRow.id, "register", getIP(request), now()).run();
 
-  if (wantsHtml) {
-    return html("", 302, { "Location": "/dashboard", "Set-Cookie": cookieHeader("GHGEN_SESSION", sid, SESSION_TTL) });
-  }
+  if (wantsHtml) return html("", 302, { "Location": "/dashboard", "Set-Cookie": cookieHeader("GHGEN_SESSION", sid, SESSION_TTL) });
   return json({ ok: true }, 200, { "Set-Cookie": cookieHeader("GHGEN_SESSION", sid, SESSION_TTL) });
 }
 
 async function handleLogin(request, env) {
   const ct = request.headers.get("Content-Type") || "";
   let body;
-  if (ct.includes("application/json")) {
-    body = await request.json().catch(() => ({}));
-  } else {
+  if (ct.includes("application/json")) body = await request.json().catch(() => ({}));
+  else {
     const fd = await request.formData();
     body = { username: fd.get("username"), password: fd.get("password") };
   }
-
   const username = String(body.username || "").trim();
   const password = String(body.password || "");
   const wantsHtml = !ct.includes("application/json");
@@ -429,100 +432,143 @@ async function handleLogin(request, env) {
   if (!username || !password) {
     return wantsHtml ? html(loginPage("Fill all fields."), 400) : json({ ok: false, error: "missing_fields" }, 400);
   }
-
   const user = await env.DB.prepare(`SELECT * FROM ghgen_users WHERE username = ? LIMIT 1`).bind(username).first();
-  if (!user) {
+  if (!user || !(await verifyPassword(user.password_hash, password))) {
     return wantsHtml ? html(loginPage("Invalid credentials."), 401) : json({ ok: false, error: "invalid_credentials" }, 401);
   }
-
-  const ok = await verifyPassword(user.password_hash, password);
-  if (!ok) {
-    return wantsHtml ? html(loginPage("Invalid credentials."), 401) : json({ ok: false, error: "invalid_credentials" }, 401);
-  }
-
   const sid = await createSession(env, user.id, getIP(request));
   await env.DB.prepare(`UPDATE ghgen_users SET last_login = ? WHERE id = ?`).bind(now(), user.id).run();
   await env.DB.prepare(`INSERT INTO ghgen_log (user_id, action, ip, created_at) VALUES (?, ?, ?, ?)`)
     .bind(user.id, "login", getIP(request), now()).run();
 
-  if (wantsHtml) {
-    return html("", 302, { "Location": "/dashboard", "Set-Cookie": cookieHeader("GHGEN_SESSION", sid, SESSION_TTL) });
-  }
+  if (wantsHtml) return html("", 302, { "Location": "/dashboard", "Set-Cookie": cookieHeader("GHGEN_SESSION", sid, SESSION_TTL) });
   return json({ ok: true }, 200, { "Set-Cookie": cookieHeader("GHGEN_SESSION", sid, SESSION_TTL) });
 }
 
 async function handleLogout(env, request) {
   const sid = getCookie(request, "GHGEN_SESSION");
-  if (sid) {
-    await env.DB.prepare(`DELETE FROM ghgen_sessions WHERE session_id = ?`).bind(sid).run();
-  }
+  if (sid) await env.DB.prepare(`DELETE FROM ghgen_sessions WHERE session_id = ?`).bind(sid).run();
   return html("", 302, { "Location": "/login", "Set-Cookie": clearCookieHeader("GHGEN_SESSION") });
-}
-
-async function handleMe(env, request) {
-  const user = await requireUser(env, request);
-  if (!user) return json({ ok: false, error: "unauthorized" }, 401);
-  const ks = await loadKeyStatus(env, user.key);
-  return json({ ok: true, user: { username: user.username, key: user.key }, key: ks });
 }
 
 async function handleAccounts(env, request) {
   const user = await requireUser(env, request);
   if (!user) return json({ ok: false, error: "unauthorized" }, 401);
+
   const rows = await env.DB.prepare(
-    `SELECT id, roblox_username, country, city, ip, status, reason, created_at, finished_at
-     FROM ghgen_accounts WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`
+    `SELECT id, payload, issued_at FROM ghgen_pool WHERE issued_to = ? ORDER BY issued_at DESC LIMIT 100`
   ).bind(user.id).all();
-  return json({ ok: true, accounts: rows.results || [] });
+
+  const accounts = [];
+  for (const row of rows.results || []) {
+    try {
+      const dec = await decryptPayload(env, row.payload);
+      accounts.push({ ...dec, issued_at: row.issued_at });
+    } catch (e) {
+      // пропускаем битые записи
+    }
+  }
+  return json({ ok: true, accounts });
 }
 
-async function handleGenerate(env, request) {
+async function handleClaim(env, request) {
   const user = await requireUser(env, request);
   if (!user) return json({ ok: false, error: "unauthorized" }, 401);
 
-  // Key still valid?
   const ks = await loadKeyStatus(env, user.key);
   if (!ks.valid) return json({ ok: false, error: "key_" + ks.reason }, 403);
 
-  // Anti-spam: не больше 1 pending на пользователя
-  const pending = await env.DB.prepare(
-    `SELECT id FROM ghgen_accounts WHERE user_id = ? AND status IN ('pending','running') LIMIT 1`
-  ).bind(user.id).first();
-  if (pending) return json({ ok: false, error: "already_pending", job_id: pending.id }, 429);
-
+  // Атомарно: берём одну свободную запись
   const ts = now();
   const res = await env.DB.prepare(
-    `INSERT INTO ghgen_accounts (user_id, status, created_at) VALUES (?, 'pending', ?)`
-  ).bind(user.id, ts).run();
+    `UPDATE ghgen_pool
+     SET status = 'issued', issued_to = ?, issued_at = ?
+     WHERE id = (
+       SELECT id FROM ghgen_pool WHERE status = 'available' ORDER BY RANDOM() LIMIT 1
+     )
+     RETURNING id, payload`
+  ).bind(user.id, ts).first();
 
-  await env.DB.prepare(`INSERT INTO ghgen_log (user_id, action, meta, ip, created_at) VALUES (?, ?, ?, ?, ?)`)
-    .bind(user.id, "generate", JSON.stringify({ job_id: res.meta.last_row_id }), getIP(request), ts).run();
+  if (!res) return json({ ok: false, error: "pool_empty" }, 404);
 
-  return json({ ok: true, job_id: res.meta.last_row_id });
+  try {
+    const dec = await decryptPayload(env, res.payload);
+    await env.DB.prepare(`INSERT INTO ghgen_log (user_id, action, meta, ip, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .bind(user.id, "claim", JSON.stringify({ pool_id: res.id }), getIP(request), ts).run();
+    return json({ ok: true, account: { ...dec, issued_at: ts } });
+  } catch (e) {
+    return json({ ok: false, error: "decrypt_failed" }, 500);
+  }
 }
 
-// ---------- MAIN ----------
+// ---------- admin upload ----------
+async function handlePoolUpload(request, env) {
+  const secret = request.headers.get("X-Upload-Secret");
+  if (!env.UPLOAD_SECRET || secret !== env.UPLOAD_SECRET) {
+    return json({ ok: false, error: "unauthorized" }, 401);
+  }
+  let body;
+  try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400); }
+  const accounts = Array.isArray(body.accounts) ? body.accounts : [];
+  if (!accounts.length) return json({ ok: false, error: "no_accounts" }, 400);
+  if (accounts.length > 500) return json({ ok: false, error: "too_many", max: 500 }, 413);
+
+  let added = 0, skipped = 0;
+  const ts = now();
+  for (const a of accounts) {
+    if (!a || typeof a.u !== "string" || typeof a.p !== "string") { skipped++; continue; }
+    const clean = {
+      u: a.u.trim(),
+      p: a.p,
+      c: a.c ? String(a.c).trim() : null,
+      ci: a.ci ? String(a.ci).trim() : null,
+      ip: a.ip ? String(a.ip).trim() : null,
+      ck: a.ck ? String(a.ck) : null,
+    };
+    try {
+      const payload = await encryptPayload(env, clean);
+      await env.DB.prepare(
+        `INSERT INTO ghgen_pool (payload, status, created_at) VALUES (?, 'available', ?)`
+      ).bind(payload, ts).run();
+      added++;
+    } catch (e) {
+      skipped++;
+    }
+  }
+  return json({ ok: true, added, skipped });
+}
+
+async function handlePoolStats(request, env) {
+  const secret = request.headers.get("X-Upload-Secret");
+  if (!env.UPLOAD_SECRET || secret !== env.UPLOAD_SECRET) return json({ ok: false, error: "unauthorized" }, 401);
+  const avail = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='available'`).first();
+  const issued = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='issued'`).first();
+  return json({ ok: true, available: avail.c, issued: issued.c, total: avail.c + issued.c });
+}
+
+// ---------- main ----------
 export default {
   async fetch(request, env) {
     setMainSite(env.MAIN_SITE);
     try {
       if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-
       const url = new URL(request.url);
       let path = url.pathname;
       if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
 
-      // Auth routes
+      // auth
       if (request.method === "POST" && path === "/api/register") return await handleRegister(request, env);
       if (request.method === "POST" && path === "/api/login") return await handleLogin(request, env);
       if (request.method === "GET" && path === "/api/logout") return await handleLogout(env, request);
-      if (request.method === "GET" && path === "/api/me") return await handleMe(env, request);
       if (request.method === "GET" && path === "/api/accounts") return await handleAccounts(env, request);
-      if (request.method === "POST" && path === "/api/generate") return await handleGenerate(env, request);
+      if (request.method === "POST" && path === "/api/claim") return await handleClaim(env, request);
 
-      // Pages
+      // admin pool
+      if (request.method === "POST" && path === "/api/pool/upload") return await handlePoolUpload(request, env);
+      if (request.method === "GET" && path === "/api/pool/stats") return await handlePoolStats(request, env);
+
+      // pages
       const user = await requireUser(env, request);
-
       if (request.method === "GET" && path === "/") {
         return html("", 302, { "Location": user ? "/dashboard" : "/login" });
       }
@@ -539,19 +585,7 @@ export default {
         const ks = await loadKeyStatus(env, user.key);
         return html(dashboardPage(user, ks));
       }
-      if (request.method === "GET" && path === "/docs") {
-        return html(docsPage());
-      }
-
-      // API for bot: list pending jobs (без auth — но закройте через Cloudflare Access или добавьте секрет)
-      if (request.method === "GET" && path === "/api/bot/pending") {
-        const rows = await env.DB.prepare(
-          `SELECT a.id, a.user_id, u.username as site_username, u.key
-           FROM ghgen_accounts a JOIN ghgen_users u ON u.id = a.user_id
-           WHERE a.status = 'pending' ORDER BY a.created_at ASC LIMIT 10`
-        ).all();
-        return json({ ok: true, jobs: rows.results || [] });
-      }
+      if (request.method === "GET" && path === "/docs") return html(docsPage());
 
       return html(pageShell("404", `<h1>404</h1><p class="sub">Not found.</p>`), 404);
     } catch (e) {
