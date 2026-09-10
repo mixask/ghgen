@@ -502,11 +502,10 @@ async function handleClaim(env, request) {
 }
 
 // ---------- admin upload ----------
-async function handlePoolUpload(request, env) {
-  const secret = request.headers.get("X-Upload-Secret");
-  if (!env.UPLOAD_SECRET || secret !== env.UPLOAD_SECRET) {
-    return json({ ok: false, error: "unauthorized" }, 401);
-  }
+const secret = request.headers.get("X-Upload-Secret");
+if (secret !== "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q") {
+  return json({ ok: false, error: "unauthorized" }, 401);
+}
   let body;
   try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400); }
   const accounts = Array.isArray(body.accounts) ? body.accounts : [];
@@ -538,9 +537,8 @@ async function handlePoolUpload(request, env) {
   return json({ ok: true, added, skipped });
 }
 
-async function handlePoolStats(request, env) {
-  const secret = request.headers.get("X-Upload-Secret");
-  if (!env.UPLOAD_SECRET || secret !== env.UPLOAD_SECRET) return json({ ok: false, error: "unauthorized" }, 401);
+const secret = request.headers.get("X-Upload-Secret");
+if (secret !== "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q") return json({ ok: false, error: "unauthorized" }, 401);
   const avail = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='available'`).first();
   const issued = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='issued'`).first();
   return json({ ok: true, available: avail.c, issued: issued.c, total: avail.c + issued.c });
