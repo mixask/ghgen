@@ -1,6 +1,7 @@
 /**
  * ghgen — GHGen dashboard worker
- * Bindings: DB (D1), POOL_KEY, UPLOAD_SECRET
+ * Bindings: DB (D1), POOL_KEY (Secret)
+ * UPLOAD_SECRET захардкожен в коде (см. ниже)
  */
 
 const CORS = {
@@ -12,6 +13,12 @@ const CORS = {
 const SESSION_TTL = 7 * 24 * 60 * 60;
 const PBKDF2_ITER = 100_000;
 const PBKDF2_HASH = "SHA-256";
+
+// ============================================================
+//  ВНИМАНИЕ: секрет для загрузки в пул захардкожен здесь.
+//  Если меняешь — поменяй в upload_pool.py тоже.
+// ============================================================
+const HARDCODED_UPLOAD_SECRET = "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q";
 
 const jsonHeaders = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 
@@ -88,7 +95,7 @@ function getCookie(request, name) {
   return null;
 }
 
-// ---------- pool encryption (AES-GCM) ----------
+// ---------- pool encryption ----------
 function b64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -174,7 +181,6 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
 .nav{display:flex;gap:6px;align-items:center}
 .nav a{color:var(--muted);padding:7px 12px;border-radius:8px;font-size:13px;font-weight:500}
 .nav a:hover{color:var(--text);background:var(--bg2);text-decoration:none}
-.nav a.active{color:var(--text);background:var(--bg2)}
 h1{font-size:1.6rem;font-weight:700;margin-bottom:6px}
 h2{font-size:1.1rem;font-weight:600;margin-bottom:8px}
 .sub{color:var(--muted);font-size:14px;margin-bottom:22px}
@@ -187,7 +193,6 @@ button:hover,.btn:hover{border-color:var(--accent);color:var(--accent);text-deco
 button.primary{background:var(--accent);color:#0a0a0a;border-color:var(--accent)}
 button.primary:hover{color:#0a0a0a;filter:brightness(1.08)}
 button:disabled{opacity:.5;cursor:not-allowed}
-.row{display:flex;gap:10px;flex-wrap:wrap}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:700px){.grid{grid-template-columns:1fr}}
 .muted{color:var(--muted);font-size:13px}
@@ -367,7 +372,7 @@ async function loadKeyStatus(env, key) {
   return { valid: true, plan: record.plan || "day", expires_at: record.expires_at };
 }
 
-// ---------- auth handlers ----------
+// ---------- auth ----------
 async function handleRegister(request, env) {
   const ct = request.headers.get("Content-Type") || "";
   let body;
@@ -464,9 +469,7 @@ async function handleAccounts(env, request) {
     try {
       const dec = await decryptPayload(env, row.payload);
       accounts.push({ ...dec, issued_at: row.issued_at });
-    } catch (e) {
-      // пропускаем битые записи
-    }
+    } catch (e) {}
   }
   return json({ ok: true, accounts });
 }
@@ -478,7 +481,6 @@ async function handleClaim(env, request) {
   const ks = await loadKeyStatus(env, user.key);
   if (!ks.valid) return json({ ok: false, error: "key_" + ks.reason }, 403);
 
-  // Атомарно: берём одну свободную запись
   const ts = now();
   const res = await env.DB.prepare(
     `UPDATE ghgen_pool
@@ -501,11 +503,14 @@ async function handleClaim(env, request) {
   }
 }
 
-// ---------- admin upload ----------
-const secret = request.headers.get("X-Upload-Secret");
-if (secret !== "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q") {
-  return json({ ok: false, error: "unauthorized" }, 401);
-}
+// ============================================================
+//  POOL ADMIN — секрет захардкожен
+// ============================================================
+async function handlePoolUpload(request, env) {
+  const secret = request.headers.get("X-Upload-Secret");
+  if (secret !== HARDCODED_UPLOAD_SECRET) {
+    return json({ ok: false, error: "unauthorized" }, 401);
+  }
   let body;
   try { body = await request.json(); } catch { return json({ ok: false, error: "invalid_json" }, 400); }
   const accounts = Array.isArray(body.accounts) ? body.accounts : [];
@@ -537,8 +542,9 @@ if (secret !== "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q") {
   return json({ ok: true, added, skipped });
 }
 
-const secret = request.headers.get("X-Upload-Secret");
-if (secret !== "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q") return json({ ok: false, error: "unauthorized" }, 401);
+async function handlePoolStats(request, env) {
+  const secret = request.headers.get("X-Upload-Secret");
+  if (secret !== HARDCODED_UPLOAD_SECRET) return json({ ok: false, error: "unauthorized" }, 401);
   const avail = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='available'`).first();
   const issued = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='issued'`).first();
   return json({ ok: true, available: avail.c, issued: issued.c, total: avail.c + issued.c });
@@ -554,18 +560,15 @@ export default {
       let path = url.pathname;
       if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
 
-      // auth
       if (request.method === "POST" && path === "/api/register") return await handleRegister(request, env);
       if (request.method === "POST" && path === "/api/login") return await handleLogin(request, env);
       if (request.method === "GET" && path === "/api/logout") return await handleLogout(env, request);
       if (request.method === "GET" && path === "/api/accounts") return await handleAccounts(env, request);
       if (request.method === "POST" && path === "/api/claim") return await handleClaim(env, request);
 
-      // admin pool
       if (request.method === "POST" && path === "/api/pool/upload") return await handlePoolUpload(request, env);
       if (request.method === "GET" && path === "/api/pool/stats") return await handlePoolStats(request, env);
 
-      // pages
       const user = await requireUser(env, request);
       if (request.method === "GET" && path === "/") {
         return html("", 302, { "Location": user ? "/dashboard" : "/login" });
