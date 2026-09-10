@@ -1,4 +1,5 @@
 /**
+ * hello pls deploy this vers
  * ghgen — GHGen dashboard worker
  * Bindings: DB (D1), POOL_KEY (Secret)
  * UPLOAD_SECRET захардкожен
