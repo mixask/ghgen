@@ -1,7 +1,8 @@
 /**
  * ghgen — GHGen dashboard worker
  * Bindings: DB (D1), POOL_KEY (Secret)
- * UPLOAD_SECRET захардкожен в коде (см. ниже)
+ * UPLOAD_SECRET захардкожен
+ * Claim cooldown: 5 минут
  */
 
 const CORS = {
@@ -11,13 +12,10 @@ const CORS = {
 };
 
 const SESSION_TTL = 7 * 24 * 60 * 60;
+const CLAIM_COOLDOWN = 5 * 60; // 5 минут
 const PBKDF2_ITER = 100_000;
 const PBKDF2_HASH = "SHA-256";
 
-// ============================================================
-//  ВНИМАНИЕ: секрет для загрузки в пул захардкожен здесь.
-//  Если меняешь — поменяй в upload_pool.py тоже.
-// ============================================================
 const HARDCODED_UPLOAD_SECRET = "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q";
 
 const jsonHeaders = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
@@ -53,7 +51,6 @@ function randomId(len = 24) {
   return [...b].map(x => x.toString(16).padStart(2, "0")).join("");
 }
 
-// ---------- password hashing ----------
 async function hashPassword(password) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const km = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
@@ -79,7 +76,6 @@ async function verifyPassword(stored, password) {
   } catch { return false; }
 }
 
-// ---------- cookies ----------
 function cookieHeader(name, value, maxAge) {
   return `${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
@@ -95,7 +91,6 @@ function getCookie(request, name) {
   return null;
 }
 
-// ---------- pool encryption ----------
 function b64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -132,7 +127,6 @@ async function decryptPayload(env, stored) {
   return JSON.parse(new TextDecoder().decode(pt));
 }
 
-// ---------- sessions ----------
 async function createSession(env, userId, ip) {
   const sid = randomId(32);
   const ts = now();
@@ -160,7 +154,6 @@ function requireUser(env, request) {
   return getSessionUser(env, getCookie(request, "GHGEN_SESSION"));
 }
 
-// ---------- HTML ----------
 function pageShell(title, content) {
   return `<!doctype html>
 <html lang="en">
@@ -205,6 +198,7 @@ th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;le
 .badge.ok{background:rgba(76,175,122,.12);color:var(--ok);border-color:rgba(76,175,122,.3)}
 .badge.err{background:rgba(232,93,93,.12);color:var(--bad);border-color:rgba(232,93,93,.3)}
 .note{color:var(--muted);font-size:12px;margin-top:14px}
+.why{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;font-style:italic;line-height:1.5}
 .reveal{background:#0a0a0c;border:1px dashed var(--line);padding:6px 10px;border-radius:6px;cursor:pointer;display:inline-block;color:var(--muted);font-size:12px}
 .reveal:hover{border-color:var(--accent);color:var(--accent)}
 </style>
@@ -288,6 +282,7 @@ function dashboardPage(user, keyStatus) {
       <p class="muted">Take a random account from the pool.</p>
       <button class="primary" id="btn-claim" style="margin-top:12px;width:100%">Claim account</button>
       <p class="note" id="claim-out"></p>
+      <p class="why">Why? I am generating these accounts alone, the pool is not big</p>
     </div>
   </div>
 
@@ -298,6 +293,13 @@ function dashboardPage(user, keyStatus) {
 
   <script>
   function mask(v){ if(!v) return '—'; const s=String(v); if(s.length<=6) return s[0]+'•••'; return s.slice(0,3)+'•••'+s.slice(-2); }
+
+  function fmtWait(sec) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+  }
 
   async function loadAccounts() {
     const el = document.getElementById('accounts-list');
@@ -328,14 +330,62 @@ function dashboardPage(user, keyStatus) {
       el.innerHTML = '<p class="err">' + e + '</p>';
     }
   }
-  document.getElementById('btn-claim').addEventListener('click', async () => {
-    const out = document.getElementById('claim-out');
+
+  const btn = document.getElementById('btn-claim');
+  const out = document.getElementById('claim-out');
+  let cooldownTimer = null;
+
+  function startCooldown(seconds) {
+    btn.disabled = true;
+    let left = seconds;
+    if (cooldownTimer) clearInterval(cooldownTimer);
+    btn.textContent = 'Wait ' + fmtWait(left);
+    cooldownTimer = setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        clearInterval(cooldownTimer);
+        cooldownTimer = null;
+        btn.disabled = false;
+        btn.textContent = 'Claim account';
+        out.className = 'note';
+        out.textContent = '';
+      } else {
+        btn.textContent = 'Wait ' + fmtWait(left);
+      }
+    }, 1000);
+  }
+
+  btn.addEventListener('click', async () => {
     out.className = 'note'; out.textContent = 'Claiming…';
-    const r = await fetch('/api/claim', { method: 'POST', credentials: 'same-origin' });
-    const d = await r.json();
-    if (d.ok) { out.className = 'note ok'; out.textContent = 'Claimed: ' + d.account.u; loadAccounts(); }
-    else { out.className = 'note err'; out.textContent = d.error || 'error'; }
+    btn.disabled = true;
+    try {
+      const r = await fetch('/api/claim', { method: 'POST', credentials: 'same-origin' });
+      const d = await r.json();
+      if (d.ok) {
+        out.className = 'note ok';
+        out.textContent = 'Claimed: ' + d.account.u;
+        loadAccounts();
+        startCooldown(300);
+      } else if (d.error === 'cooldown') {
+        out.className = 'note err';
+        out.textContent = d.message || 'Cooldown active.';
+        startCooldown(d.wait_seconds || 300);
+      } else if (d.error === 'pool_empty') {
+        out.className = 'note err';
+        out.textContent = 'Pool is empty right now. Check back later.';
+        btn.disabled = false;
+      } else {
+        out.className = 'note err';
+        out.textContent = d.error || 'error';
+        btn.disabled = false;
+      }
+    } catch (e) {
+      out.className = 'note err';
+      out.textContent = String(e);
+      btn.disabled = false;
+    }
   });
+
   loadAccounts();
   </script>`);
 }
@@ -350,7 +400,7 @@ function docsPage() {
   </div>
   <div class="card">
     <h2>Claim</h2>
-    <p class="muted">Click "Claim account" on the dashboard. You get a random available account from the pool.</p>
+    <p class="muted">Click "Claim account" on the dashboard. You get a random available account from the pool. Cooldown is 5 minutes between claims.</p>
   </div>
   <div class="card">
     <h2>Rules</h2>
@@ -363,7 +413,6 @@ function escapeHtml(s) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-// ---------- key validation ----------
 async function loadKeyStatus(env, key) {
   const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
   if (!record) return { valid: false, reason: "invalid_key" };
@@ -372,7 +421,6 @@ async function loadKeyStatus(env, key) {
   return { valid: true, plan: record.plan || "day", expires_at: record.expires_at };
 }
 
-// ---------- auth ----------
 async function handleRegister(request, env) {
   const ct = request.headers.get("Content-Type") || "";
   let body;
@@ -481,6 +529,24 @@ async function handleClaim(env, request) {
   const ks = await loadKeyStatus(env, user.key);
   if (!ks.valid) return json({ ok: false, error: "key_" + ks.reason }, 403);
 
+  const last = await env.DB.prepare(
+    `SELECT issued_at FROM ghgen_pool WHERE issued_to = ? ORDER BY issued_at DESC LIMIT 1`
+  ).bind(user.id).first();
+  if (last && last.issued_at) {
+    const elapsed = now() - Number(last.issued_at);
+    if (elapsed < CLAIM_COOLDOWN) {
+      const wait = CLAIM_COOLDOWN - elapsed;
+      const mins = Math.floor(wait / 60);
+      const secs = wait % 60;
+      return json({
+        ok: false,
+        error: "cooldown",
+        wait_seconds: wait,
+        message: `Wait ${mins}m ${secs}s before the next claim.`,
+      }, 429);
+    }
+  }
+
   const ts = now();
   const res = await env.DB.prepare(
     `UPDATE ghgen_pool
@@ -503,9 +569,6 @@ async function handleClaim(env, request) {
   }
 }
 
-// ============================================================
-//  POOL ADMIN — секрет захардкожен
-// ============================================================
 async function handlePoolUpload(request, env) {
   const secret = request.headers.get("X-Upload-Secret");
   if (secret !== HARDCODED_UPLOAD_SECRET) {
@@ -550,7 +613,6 @@ async function handlePoolStats(request, env) {
   return json({ ok: true, available: avail.c, issued: issued.c, total: avail.c + issued.c });
 }
 
-// ---------- main ----------
 export default {
   async fetch(request, env) {
     setMainSite(env.MAIN_SITE);
