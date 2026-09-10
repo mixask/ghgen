@@ -580,10 +580,22 @@ async function handlePoolUpload(request, env) {
   if (!accounts.length) return json({ ok: false, error: "no_accounts" }, 400);
   if (accounts.length > 500) return json({ ok: false, error: "too_many", max: 500 }, 413);
 
+  // Проверяем POOL_KEY до начала обработки
+  try {
+    await getPoolKey(env);
+  } catch (e) {
+    return json({ ok: false, error: "pool_key_invalid", message: String(e.message || e) }, 500);
+  }
+
   let added = 0, skipped = 0;
+  const errors = [];
   const ts = now();
   for (const a of accounts) {
-    if (!a || typeof a.u !== "string" || typeof a.p !== "string") { skipped++; continue; }
+    if (!a || typeof a.u !== "string" || typeof a.p !== "string") {
+      skipped++;
+      if (errors.length < 3) errors.push(`invalid_record: ${JSON.stringify(a).slice(0, 100)}`);
+      continue;
+    }
     const clean = {
       u: a.u.trim(),
       p: a.p,
@@ -600,9 +612,10 @@ async function handlePoolUpload(request, env) {
       added++;
     } catch (e) {
       skipped++;
+      if (errors.length < 3) errors.push(`${clean.u}: ${String(e.message || e)}`);
     }
   }
-  return json({ ok: true, added, skipped });
+  return json({ ok: true, added, skipped, errors: errors.length ? errors : undefined });
 }
 
 async function handlePoolStats(request, env) {
