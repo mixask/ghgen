@@ -1,7 +1,8 @@
 /**
  * ghgen — GHGen dashboard worker
  * Bindings: DB (D1)
- * POOL_KEY и UPLOAD_SECRET захардкожены в коде
+ * Secrets: POOL_KEY, UPLOAD_SECRET (env)
+ * Fallback: hardcoded (для миграции, потом уберём)
  * Claim cooldown: 5 минут
  */
 
@@ -17,12 +18,15 @@ const PBKDF2_ITER = 100_000;
 const PBKDF2_HASH = "SHA-256";
 
 // ============================================================
-//  HARDCODED SECRETS
-//  ⚠️ POOL_KEY НЕЛЬЗЯ менять после загрузки аккаунтов —
-//  иначе старые данные в пуле невозможно расшифровать.
+//  FALLBACK (используется, если env не задан)
+//  ⚠️ После того как env заработает — удалить эти строки
 // ============================================================
-const HARDCODED_UPLOAD_SECRET = "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q";
-const HARDCODED_POOL_KEY = "kmBG9WpCmnrAjI1eCcGzzH8gZAuYjLj0k0B7VstliFM=";
+const FALLBACK_UPLOAD_SECRET = "-qcP-9Qeub-03tnKaNKJtGzcCCVy7n6ACFyTr-zCK_Q";
+const FALLBACK_POOL_KEY = "kmBG9WpCmnrAjI1eCcGzzH8gZAuYjLj0k0B7VstliFM=";
+
+function getUploadSecret(env) {
+  return env.UPLOAD_SECRET || FALLBACK_UPLOAD_SECRET;
+}
 
 const jsonHeaders = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" };
 
@@ -110,10 +114,10 @@ function bytesToB64(bytes) {
 }
 
 // ============================================================
-//  POOL KEY — захардкожен
+//  POOL KEY — env с fallback
 // ============================================================
 async function getPoolKey(env) {
-  const raw = HARDCODED_POOL_KEY;
+  const raw = env.POOL_KEY || FALLBACK_POOL_KEY;
   if (!raw) throw new Error("POOL_KEY not set");
   const keyBytes = b64ToBytes(raw);
   if (keyBytes.length !== 32) throw new Error("POOL_KEY must be 32 bytes (got " + keyBytes.length + ")");
@@ -209,8 +213,9 @@ th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;le
 .badge.err{background:rgba(232,93,93,.12);color:var(--bad);border-color:rgba(232,93,93,.3)}
 .note{color:var(--muted);font-size:12px;margin-top:14px}
 .why{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;font-style:italic;line-height:1.5}
-.reveal{background:#0a0a0c;border:1px dashed var(--line);padding:6px 10px;border-radius:6px;cursor:pointer;display:inline-block;color:var(--muted);font-size:12px}
+.reveal{background:#0a0a0c;border:1px dashed var(--line);padding:6px 10px;border-radius:6px;cursor:pointer;display:inline-block;color:var(--muted);font-size:12px;user-select:none;transition:all .15s}
 .reveal:hover{border-color:var(--accent);color:var(--accent)}
+.reveal.copied{border-color:var(--ok);color:var(--ok)}
 </style>
 </head>
 <body>
@@ -321,18 +326,40 @@ function dashboardPage(user, keyStatus) {
       el.innerHTML = '<table><thead><tr><th>Username</th><th>Password</th><th>Location</th><th>Cookie</th><th>Claimed</th></tr></thead><tbody>'
         + d.accounts.map((a, i) => '<tr>'
           + '<td class="mono">' + a.u + '</td>'
-          + '<td><span class="reveal" data-id="p-' + i + '" data-val="' + encodeURIComponent(a.p || '') + '">' + mask(a.p) + '</span></td>'
+          + '<td><span class="reveal reveal-pass" data-id="p-' + i + '" data-val="' + encodeURIComponent(a.p || '') + '">' + mask(a.p) + '</span></td>'
           + '<td>' + ((a.c || '') + (a.ci ? ', ' + a.ci : '') || '—') + (a.ip ? '<br><span class="muted mono">' + a.ip + '</span>' : '') + '</td>'
-          + '<td>' + (a.ck ? '<span class="reveal" data-id="c-' + i + '" data-val="' + encodeURIComponent(a.ck) + '">' + mask(a.ck) + '</span>' : '<span class="muted">—</span>') + '</td>'
+          + '<td>' + (a.ck ? '<span class="reveal reveal-cookie" data-val="' + encodeURIComponent(a.ck) + '">Copy cookie</span>' : '<span class="muted">—</span>') + '</td>'
           + '<td class="muted">' + new Date(a.issued_at * 1000).toLocaleString() + '</td>'
           + '</tr>').join('') + '</tbody></table>';
-      document.querySelectorAll('.reveal').forEach(el => {
+
+      // Password: click toggles reveal
+      document.querySelectorAll('.reveal-pass').forEach(el => {
         el.addEventListener('click', function(){
           const v = decodeURIComponent(this.dataset.val);
           if (this.dataset.revealed === '1') {
             this.textContent = mask(v); this.dataset.revealed = '0';
           } else {
             this.textContent = v; this.dataset.revealed = '1';
+          }
+        });
+      });
+
+      // Cookie: click copies to clipboard
+      document.querySelectorAll('.reveal-cookie').forEach(el => {
+        el.addEventListener('click', async function(){
+          const v = decodeURIComponent(this.dataset.val);
+          try {
+            await navigator.clipboard.writeText(v);
+            const old = this.textContent;
+            this.textContent = 'Copied!';
+            this.classList.add('copied');
+            setTimeout(() => {
+              this.textContent = old;
+              this.classList.remove('copied');
+            }, 1500);
+          } catch (e) {
+            this.textContent = 'Failed';
+            setTimeout(() => { this.textContent = 'Copy cookie'; }, 1500);
           }
         });
       });
@@ -581,7 +608,7 @@ async function handleClaim(env, request) {
 
 async function handlePoolUpload(request, env) {
   const secret = request.headers.get("X-Upload-Secret");
-  if (secret !== HARDCODED_UPLOAD_SECRET) {
+  if (secret !== getUploadSecret(env)) {
     return json({ ok: false, error: "unauthorized" }, 401);
   }
   let body;
@@ -629,7 +656,7 @@ async function handlePoolUpload(request, env) {
 
 async function handlePoolStats(request, env) {
   const secret = request.headers.get("X-Upload-Secret");
-  if (secret !== HARDCODED_UPLOAD_SECRET) return json({ ok: false, error: "unauthorized" }, 401);
+  if (secret !== getUploadSecret(env)) return json({ ok: false, error: "unauthorized" }, 401);
 
   let poolKeyOk = true;
   let poolKeyError = null;
@@ -649,6 +676,8 @@ async function handlePoolStats(request, env) {
     total: avail.c + issued.c,
     pool_key_ok: poolKeyOk,
     pool_key_error: poolKeyError,
+    using_env_secret: !!env.UPLOAD_SECRET,
+    using_env_pool_key: !!env.POOL_KEY,
   });
 }
 
