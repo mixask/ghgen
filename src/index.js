@@ -111,7 +111,10 @@ async function decryptPayload(env, stored) {
 // ============================================================
 async function sendEmail(env, to, code) {
   const apiKey = env.RESEND_API_KEY;
-  if (!apiKey) return { ok: false, error: "RESEND_API_KEY not set" };
+  if (!apiKey) {
+    console.error("sendEmail: RESEND_API_KEY not set");
+    return { ok: false, error: "RESEND_API_KEY_not_set" };
+  }
 
   const html = `
     <div style="font-family:-apple-system,sans-serif;background:#0c0c0d;color:#e8e8ea;padding:40px;border-radius:12px;max-width:480px;margin:0 auto">
@@ -123,24 +126,40 @@ async function sendEmail(env, to, code) {
     </div>
   `;
 
-  const res = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: "GHGen <noreply@gen.greedyhudzell.xyz>",
-      to: [to],
-      subject: "GHGen — verification code",
-      html,
-    }),
-  });
+  const payload = {
+    from: "GHGen <noreply@gen.greedyhudzell.xyz>",
+    to: [to],
+    subject: "GHGen — verification code",
+    html,
+  };
+
+  let res;
+  try {
+    res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "User-Agent": "GHGen-Worker/1.0",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    console.error("sendEmail fetch error:", String(e));
+    return { ok: false, error: "fetch_failed", message: String(e.message || e) };
+  }
+
+  const bodyText = await res.text().catch(() => "");
+  console.log("resend response:", res.status, bodyText.slice(0, 500));
 
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    console.error("resend error:", res.status, txt.slice(0, 200));
-    return { ok: false, error: `resend_http_${res.status}` };
+    let parsed = null;
+    try { parsed = JSON.parse(bodyText); } catch {}
+    return {
+      ok: false,
+      error: `resend_http_${res.status}`,
+      message: (parsed && (parsed.message || parsed.error)) || bodyText.slice(0, 200),
+    };
   }
   return { ok: true };
 }
