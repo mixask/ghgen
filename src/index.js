@@ -130,7 +130,7 @@ async function sendEmail(env, to, code) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: "GHGen <noreply@greedyhudzell.xyz>",
+      from: "GHGen <noreply@gen.greedyhudzell.xyz>",
       to: [to],
       subject: "GHGen — verification code",
       html,
