@@ -902,7 +902,23 @@ async function handlePoolUpload(request, env) {
 
 async function handlePoolStats(request, env) {
   const secret = request.headers.get("X-Upload-Secret");
-  if (!env.UPLOAD_SECRET || secret !== env.UPLOAD_SECRET) return json({ ok: false, error: "unauthorized" }, 401);
+  const expected = env.UPLOAD_SECRET;
+
+  // ДИАГНОСТИКА: что воркер видит в env
+  const envDebug = {
+    has_upload_secret: !!env.UPLOAD_SECRET,
+    has_pool_key: !!env.POOL_KEY,
+    has_resend_key: !!env.RESEND_API_KEY,
+    upload_secret_length: env.UPLOAD_SECRET ? env.UPLOAD_SECRET.length : 0,
+    got_secret_length: secret ? secret.length : 0,
+    match: secret === expected,
+    env_keys: Object.keys(env).filter(k => !k.startsWith("__")),
+  };
+
+  if (!expected || secret !== expected) {
+    return json({ ok: false, error: "unauthorized", debug: envDebug }, 401);
+  }
+
   let poolKeyOk = true, poolKeyError = null;
   try { await getPoolKey(env); } catch (e) { poolKeyOk = false; poolKeyError = String(e.message || e); }
   const avail = await env.DB.prepare(`SELECT COUNT(*) as c FROM ghgen_pool WHERE status='available'`).first();
