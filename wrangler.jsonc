@@ -26,3 +26,32 @@
     "logs": { "enabled": true, "persist": true, "invocation_logs": true }
   }
 }
+
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ghgen",
+  "main": "src/index.js",
+  "compatibility_date": "2025-01-01",  // ← ИЗМЕНИ на прошлую дату, не будущую!
+  
+  "secrets": {
+    "required": ["UPLOAD_SECRET", "POOL_KEY", "RESEND_API_KEY"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "greedyhudzell-keys",
+      "database_id": "b37caed2-4187-4470-bade-0dbd64bb1705"
+    }
+  ],
+
+  "vars": {
+    "SITE_NAME": "GHGen",
+    "MAIN_SITE": "https://greedyhudzell.xyz"
+  },
+
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": true, "persist": true, "invocation_logs": true }
+  }
+}
