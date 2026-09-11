@@ -4,10 +4,6 @@
   "main": "src/index.js",
   "compatibility_date": "2026-08-15",
 
-  "secrets": {
-    "required": ["UPLOAD_SECRET", "POOL_KEY", "RESEND_API_KEY"]
-  },
-
   "routes": [
     { "pattern": "gen.greedyhudzell.xyz", "custom_domain": true }
   ],
