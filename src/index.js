@@ -127,7 +127,7 @@ async function sendEmail(env, to, code) {
   `;
 
   const payload = {
-    from: "GHGen <noreply@gen.greedyhudzell.xyz>",
+    from: "GHGen <support@gen.greedyhudzell.xyz>",
     to: [to],
     subject: "GHGen — verification code",
     html,
